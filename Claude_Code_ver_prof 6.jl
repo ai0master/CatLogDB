@@ -262,6 +262,8 @@ function naturality_svg(users, perms, A, Q; path="naturality.svg")
     println("  ✓ SVG: $path")
 end
 
+users = db[:, :username]      # вектор імен користувачів
+perms = db[:, :permission_name]  # вектор назв дозволів
 naturality_svg(users, perms, A, A,     path="naturality_sound.svg")
 naturality_svg(users, perms, A, Q_bad, path="naturality_unsound.svg")
 
@@ -284,8 +286,6 @@ function print_matrix(name, M, row_labels, col_labels)
     println()
 end
 
-users = db[:, :username]
-perms = db[:, :permission_name]
 
 println("=== Матриця A  (Attr_input^op ⊗ Attr_res) ===")
 print_matrix("A", A, users, perms)
