@@ -159,95 +159,109 @@ Q_bad = build_unsound_query(db)
 println("--- Некоректний запит (контрприклад) ---")
 η_bad = check_soundness(db, Q_bad, A)
 # Генерація SVG квадратів природності (Рис. 2)
-function naturality_svg(users, perms, A, Q; path="naturality.svg")
-    violations = [(i,j) for i in 1:length(users)
-                        for j in 1:length(perms)
-                        if Q[i,j] && !A[i,j]]
-    examples = vcat([(1,1,false)],            # sound: alice/full_access
-                    [(i,j,true) for (i,j) in violations])
-    W,H,PAD = 300,250,24
-    cols = 2;  rows = ceil(Int, length(examples)/cols)
-    TW = cols*W + (cols+1)*PAD
-    TH = rows*H + (rows+1)*PAD + 70
-    io = IOBuffer()
-    write(io, """<svg xmlns="http://www.w3.org/2000/svg" """)
-    write(io, """width="$TW" height="$TH" """)
-    write(io, """font-family=\"Libertinus Serif, Georgia, serif\">\n""")
-    write(io, """<rect width="100%" height="100%" fill="white"/>\n""")
-    write(io, """<defs>""")
-    write(io, """<marker id="aok" markerWidth="8" markerHeight="8" """)
-    write(io, """refX="7" refY="3" orient="auto">""")
-    write(io, """<path d="M0,0 L0,6 L8,3 z" fill="\#3A5FA0"/></marker>""")
-    write(io, """<marker id="abad" markerWidth="8" markerHeight="8" """)
-    write(io, """refX="7" refY="3" orient="auto">""")
-    write(io, """<path d="M0,0 L0,6 L8,3 z" fill="\#CC0000"/></marker>""")
-    write(io, """</defs>\n""")
-    title = "Квадрати природності η : Q ⟹ A"
-    write(io, """<text x="$(TW÷2)" y="30" text-anchor="middle" """)
-    write(io, """font-size="14" font-weight="bold" fill="\#1A2F6A">$title</text>\n""")
-    for (idx,(i,j,bad)) in enumerate(examples)
-        c = (idx-1) % cols;  r = (idx-1) ÷ cols
-        x = PAD + c*(W+PAD);  y = 70+PAD + r*(H+PAD)
-        bc = bad ? "\#FFE8E8" : "\#E8F5E9"
-        bs = bad ? "\#CC0000" : "\#2A7A2A"
-        write(io, """<rect x="$(x-5)" y="$(y-5)" """)
-        write(io, """width="$(W+10)" height="$(H+10)" rx="7" """)
-        write(io, """fill="$bc" stroke="$bs" stroke-width="1.2" opacity="0.5"/>\n""")
-        _draw_square!(io, users[i], perms[j], users[1], perms[1],
-                      Q[i,j], Q[1,1], A[i,j], A[1,1], !bad, x, y, W, H)
-    end
-    write(io, "</svg>")
-    open(path,"w") do f; write(f, String(take!(io))); end
-    println("  ✓ SVG збережено: $path")
+# Запускається після check_soundness; зберігає два файли:
+#   naturality_sound.svg   — sound Q: всі квадрати комутують
+#   naturality_unsound.svg — Q_bad: квадрати з порушеннями η
+
+const C_BLUE  = "#3A5FA0"
+const C_RED   = "#CC0000"
+const C_GREEN = "#2A7A2A"
+const C_LBLUE = "#EAF0FB"
+const C_LRED  = "#FFE5E5"
+const C_NAVY  = "#1A2F6A"
+
+function _node!(io, cx, cy, l1, l2, ok::Bool)
+    f = ok ? C_LBLUE : C_LRED
+    s = ok ? C_BLUE  : C_RED
+    print(io, "<rect x=\"$(cx-42)\" y=\"$(cy-19)\" width=\"84\" ")
+    print(io, "height=\"38\" rx=\"5\" fill=\"$f\" stroke=\"$s\" ")
+    println(io, "stroke-width=\"1.5\"/>")
+    print(io, "<text x=\"$cx\" y=\"$(cy-5)\" text-anchor=\"middle\" ")
+    println(io, "font-size=\"10\" font-weight=\"bold\" fill=\"$C_NAVY\">$l1</text>")
+    print(io, "<text x=\"$cx\" y=\"$(cy+9)\" text-anchor=\"middle\" ")
+    println(io, "font-size=\"9\" fill=\"#444\">$l2</text>")
 end
 
-function _draw_square!(io, u, p, u2, p2, q1, q2, a1, a2, eta_ok, x, y, W, H)
+function _arr!(io, x1,y1,x2,y2, lbl, ok::Bool, vert::Bool)
+    col = ok ? C_BLUE : C_RED
+    aid = ok ? "aok"  : "abad"
+    dsh = ok ? ""     : " stroke-dasharray=\"5,3\""
+    mx,my = (x1+x2)÷2, (y1+y2)÷2
+    ox = vert ? -30 : 0;  oy = vert ? 0 : -7
+    print(io, "<line x1=\"$x1\" y1=\"$y1\" x2=\"$x2\" y2=\"$y2\" ")
+    print(io, "stroke=\"$col\" stroke-width=\"1.5\"$dsh ")
+    println(io, "marker-end=\"url(#$aid)\"/>")
+    print(io, "<text x=\"$(mx+ox)\" y=\"$(my+oy)\" ")
+    println(io, "text-anchor=\"middle\" font-size=\"9\" ")
+    println(io, "font-style=\"italic\" fill=\"$col\">$lbl</text>")
+    if !ok && vert
+        println(io, "<line x1=\"$(mx+ox-6)\" y1=\"$(my-6)\" ")
+        println(io, "x2=\"$(mx+ox+6)\" y2=\"$(my+6)\" ")
+        println(io, "stroke=\"$col\" stroke-width=\"2\"/>")
+        println(io, "<line x1=\"$(mx+ox+6)\" y1=\"$(my-6)\" ")
+        println(io, "x2=\"$(mx+ox-6)\" y2=\"$(my+6)\" ")
+        println(io, "stroke=\"$col\" stroke-width=\"2\"/>")
+    end
+end
+
+function _square!(io, u,p,u2,p2, q1,q2,a1,a2, eta_ok, x,y,W,H)
     xl,xr = x+60, x+W-60;  yt,yb = y+55, y+H-55
-    _node!(io, xl, yt, "Q($u,$p)",  "= $q1", q1)
-    _node!(io, xr, yt, "Q($u2,$p2)","= $q2", true)
-    _node!(io, xl, yb, "A($u,$p)",  "= $a1", a1)
-    _node!(io, xr, yb, "A($u2,$p2)","= $a2", true)
+    _node!(io, xl,yt, "Q($u,$p)",   "= $q1", q1)
+    _node!(io, xr,yt, "Q($u2,$p2)", "= $q2", true)
+    _node!(io, xl,yb, "A($u,$p)",   "= $a1", a1)
+    _node!(io, xr,yb, "A($u2,$p2)", "= $a2", true)
     _arr!(io, xl+43,yt, xr-43,yt, "Q(f,g)", true,  false)
     _arr!(io, xl+43,yb, xr-43,yb, "A(f,g)", true,  false)
     _arr!(io, xl,yt+19, xl,yb-19, "η_($u,$p)",   eta_ok, true)
     _arr!(io, xr,yt+19, xr,yb-19, "η_($u2,$p2)", true,   true)
     lbl = eta_ok ? "✓ комутує" : "✗ не комутує"
-    col = eta_ok ? "\#2A7A2A" : "\#CC0000"
-    write(io, """<text x="$(x+W÷2)" y="$(y+H-6)" text-anchor="middle" """)
-    write(io, """font-size="10" font-weight="bold" fill="$col">$lbl</text>\n""")
+    col = eta_ok ? C_GREEN     : C_RED
+    print(io, "<text x=\"$(x+W÷2)\" y=\"$(y+H-6)\" ")
+    println(io, "text-anchor=\"middle\" font-size=\"10\" ")
+    println(io, "font-weight=\"bold\" fill=\"$col\">$lbl</text>")
 end
 
-function _node!(io, cx, cy, l1, l2, ok)
-    f = ok ? "\#EAF0FB" : "\#FFE5E5"
-    s = ok ? "\#3A5FA0" : "\#CC0000"
-    write(io, """<rect x="$(cx-42)" y="$(cy-19)" width="84" height="38" """)
-    write(io, """rx="5" fill="$f" stroke="$s" stroke-width="1.5"/>\n""")
-    write(io, """<text x="$cx" y="$(cy-5)" text-anchor="middle" """)
-    write(io, """font-size="10" font-weight="bold" fill="\#1A2F6A">$l1</text>\n""")
-    write(io, """<text x="$cx" y="$(cy+9)" text-anchor="middle" """)
-    write(io, """font-size="9" fill="\#444">$l2</text>\n""")
-end
-
-function _arr!(io, x1,y1,x2,y2, lbl, ok, vert)
-    col = ok ? "\#3A5FA0" : "\#CC0000"
-    aid = ok ? "aok"     : "abad"
-    dsh = ok ? ""        : """ stroke-dasharray=\"5,3\""""
-    mx,my = (x1+x2)÷2, (y1+y2)÷2
-    ox = vert ? -30 : 0;  oy = vert ? 0 : -7
-    write(io, """<line x1="$x1" y1="$y1" x2="$x2" y2="$y2" """)
-    write(io, """stroke="$col" stroke-width="1.5"$dsh """)
-    write(io, """marker-end="url(#$aid)"/>\n""")
-    write(io, """<text x="$(mx+ox)" y="$(my+oy)" text-anchor="middle" """)
-    write(io, """font-size="9" font-style="italic" fill="$col">$lbl</text>\n""")
-    if !ok && vert
-        write(io, """<line x1="$(mx+ox-6)" y1="$(my-6)" """)
-        write(io, """x2="$(mx+ox+6)" y2="$(my+6)" stroke="$col" stroke-width="2"/>\n""")
-        write(io, """<line x1="$(mx+ox+6)" y1="$(my-6)" """)
-        write(io, """x2="$(mx+ox-6)" y2="$(my+6)" stroke="$col" stroke-width="2"/>\n""")
+function naturality_svg(users, perms, A, Q; path="naturality.svg")
+    viols = [(i,j) for i in 1:size(Q,1), j in 1:size(Q,2)
+                   if Q[i,j] && !A[i,j]]
+    examples = vcat([(1,1,false)], [(i,j,true) for (i,j) in viols])
+    W,H,PAD = 300,250,24
+    cols = 2;  rows = ceil(Int, length(examples)/cols)
+    TW = cols*W + (cols+1)*PAD
+    TH = rows*H + (rows+1)*PAD + 70
+    open(path, "w") do io
+        println(io, "<svg xmlns=\"http://www.w3.org/2000/svg\" ")
+        println(io, "width=\"$TW\" height=\"$TH\" ")
+        println(io, "font-family=\"Libertinus Serif, Georgia, serif\">")
+        println(io, "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>")
+        # defs: arrowhead markers
+        println(io, "<defs>")
+        for (id,col) in [("aok",C_BLUE),("abad",C_RED)]
+            print(io, "<marker id=\"$id\" markerWidth=\"8\" ")
+            print(io, "markerHeight=\"8\" refX=\"7\" refY=\"3\" ")
+            println(io, "orient=\"auto\">")
+            println(io, "<path d=\"M0,0 L0,6 L8,3 z\" fill=\"$col\"/></marker>")
+        end
+        println(io, "</defs>")
+        title = "Квадрати природності η : Q ⟹ A"
+        print(io, "<text x=\"$(TW÷2)\" y=\"30\" text-anchor=\"middle\" ")
+        println(io, "font-size=\"14\" font-weight=\"bold\" fill=\"$C_NAVY\">$title</text>")
+        for (idx,(i,j,bad)) in enumerate(examples)
+            c = (idx-1) % cols;  r = (idx-1) ÷ cols
+            x = PAD + c*(W+PAD);  y = 70+PAD + r*(H+PAD)
+            bc = bad ? "#FFE8E8" : "#E8F5E9"
+            bs = bad ? C_RED     : C_GREEN
+            print(io, "<rect x=\"$(x-5)\" y=\"$(y-5)\" ")
+            print(io, "width=\"$(W+10)\" height=\"$(H+10)\" rx=\"7\" ")
+            println(io, "fill=\"$bc\" stroke=\"$bs\" stroke-width=\"1.2\" opacity=\"0.5\"/>")
+            _square!(io, users[i],perms[j],users[1],perms[1],
+                     Q[i,j],Q[1,1],A[i,j],A[1,1],!bad,x,y,W,H)
+        end
+        println(io, "</svg>")
     end
+    println("  ✓ SVG: $path")
 end
 
-# Виклик: будуємо квадрати для sound Q та некоректного Q_bad
 naturality_svg(users, perms, A, A,     path="naturality_sound.svg")
 naturality_svg(users, perms, A, Q_bad, path="naturality_unsound.svg")
 
@@ -290,7 +304,8 @@ for (i,u) in enumerate(users), (j,p) in enumerate(perms)
     end
 
 # ============================================================
-# # 6. Негативний приклад: FK-порушення → AssertionError
+# ============================================================
+# 6. Негативний приклад: FK-порушення → AssertionError
 # ============================================================
 try
   add_part!(db, :UserRole; user_of_ur=999, role_of_ur=1)
@@ -298,3 +313,4 @@ catch e
   println("Par(Set) захист: ", typeof(e))
 end
 end
+
