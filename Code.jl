@@ -1,14 +1,12 @@
 # ============================================================
 # "Категорна логічна модель формальної верифікації коректності
 #  запитів і цілісності даних у реляційних базах"
-# Julia v1.12, Catlab.jl v0.16
 # ============================================================
-
 using Catlab, Catlab.Theories, Catlab.CategoricalAlgebra, Catlab.Graphics
 using DataFrames
 
 # ============================================================
-# 1. Категорна схема RBAC 
+# 1. Категорна схема RBAC (Розділ 3, Рис. 1)
 # ============================================================
 @present RBACSchema(FreeSchema) begin
   (User, Role, Permission, Resource, UserRole, RolePermission)::Ob
@@ -31,7 +29,7 @@ end
                                     :role_of_rp, :perm_of_rp, :res_of_rp])
 
 # ============================================================
-# 2. Інстанція бази даних I : S → Par(Set) 
+# 2. Інстанція бази даних I : S → Par(Set) (Розділ 3, Табл. 2)
 # ============================================================
 db = RBAC{String}()
 
@@ -45,166 +43,200 @@ add_parts!(db, :RolePermission, 2;
            role_of_rp=[1,2], perm_of_rp=[1,2], res_of_rp=[1,1])
 
 # ============================================================
-# 3. Етап 1: Перевірка посилальної цілісності (Par(Set))
+# 3. Перевірка посилальної цілісності через pullback (Розділ 3.2)
+#    Для кожного зовнішнього ключа f : A → B будується pullback
+#    вздовж I(f) та inc : PK(I(B)) ↪ I(B).
+#    Цілісність збережена ⟺ p_A : P → I(A) є ізоморфізмом,
+#    тобто Im(p_A) = I(A).
+#    Порушники: I(A) \ Im(p_A) — записи без коректного образу в PK(I(B)).
 # ============================================================
 function check_fk_integrity(db)
   homs    = [:user_of_ur, :role_of_ur, :role_of_rp, :perm_of_rp, :res_of_rp]
-  targets = [:User,       :Role,       :Role,        :Permission,  :Resource]
+  sources = [:UserRole,   :UserRole,   :RolePermission, :RolePermission, :RolePermission]
+  targets = [:User,       :Role,       :Role,           :Permission,     :Resource]
   all_ok  = true
-  for (h, t) in zip(homs, targets)
-    vals = db[h];  pk_range = 1:nparts(db, t)
-    if any(v -> !(v in pk_range), vals)
-      println("  ✗ FK порушено: $h → $t");  all_ok = false
+
+  for (h, src, tgt) in zip(homs, sources, targets)
+    pk_range  = 1:nparts(db, tgt)          # PK(I(B))
+    vals      = db[h]                       # I(f) : I(A) → I(B)
+    src_parts = parts(db, src)             # I(A)
+
+    # Pullback P = { (a,b) | I(f)(a) = b, b ∈ PK(I(B)) }
+    P = [(a, vals[a]) for a in src_parts if vals[a] in pk_range]
+
+    # Im(p_A) — образ проекції p_A : P → I(A)
+    im_pA     = Set(a for (a, _) in P)
+
+    # I(A) \ Im(p_A) — записи-порушники
+    violators = setdiff(Set(src_parts), im_pA)
+
+    if isempty(violators)
+      println("  ✓ p_A є ізоморфізмом: $h → $tgt, цілісність збережена")
     else
-      println("  ✓ $h → $t")
+      println("  ✗ p_A не є ізоморфізмом: $h → $tgt")
+      println("    Записи-порушники I(A) \\ Im(p_A): ", collect(violators))
+      all_ok = false
     end
   end
   return all_ok
 end
 
+println("=== Перевірка посилальної цілісності ===")
 integrity_ok = check_fk_integrity(db)
 
 # ============================================================
-# 4. Етап 2: Профунктор Q : S^op × S_res → Set (coend)
+# 4. Профунктор Q : S^op × S_res → Set через коенд (Розділ 3.1)
+#    Коенд реалізується як множина класів еквівалентності свідків.
+#    Свідок для пари (u,p) — набір записів (ur, rp) такий, що
+#    user_of_ur(ur) = u, role_of_ur(ur) = role_of_rp(rp), perm_of_rp(rp) = p.
+#    Різні свідки одного кортежу (u,p) ототожнюються в коенді.
+#    Q[u,p] = true ⟺ клас еквівалентності свідків для (u,p) непорожній.
 # ============================================================
-function build_query_profunctor(db)
-  nU = nparts(db, :User);  nP = nparts(db, :Permission)
-  Q  = falses(nU, nP)
+function build_query_profunctor(db; resource_filter=nothing, action_filter=nothing)
+  nU = nparts(db, :User)
+  nP = nparts(db, :Permission)
+
+  # witnesses[u,p] = множина свідків { (ur,rp) } для кортежу (u,p)
+  witnesses = Dict{Tuple{Int,Int}, Set{Tuple{Int,Int}}}()
+  for u in 1:nU, p in 1:nP
+    witnesses[(u,p)] = Set{Tuple{Int,Int}}()
+  end
+
   for ur in parts(db, :UserRole)
-    u = db[ur, :user_of_ur];  r = db[ur, :role_of_ur]
+    u = db[ur, :user_of_ur]
+    r = db[ur, :role_of_ur]
     for rp in incident(db, r, :role_of_rp)
       p   = db[rp, :perm_of_rp]
       res = db[rp, :res_of_rp]
-      if db[res, :res_name] == "FINANCE_DATA" && db[p, :action] == "DELETE"
-        Q[u, p] = true
+      # застосування фільтрів WHERE (Означення 4.1)
+      res_ok = isnothing(resource_filter) || db[res, :res_name] == resource_filter
+      act_ok = isnothing(action_filter)   || db[p,   :action]   == action_filter
+      if res_ok && act_ok
+        push!(witnesses[(u,p)], (ur, rp))
       end
     end
+  end
+
+  # Q[u,p] = true ⟺ клас еквівалентності свідків непорожній (коенд)
+  Q = falses(nU, nP)
+  for u in 1:nU, p in 1:nP
+    Q[u,p] = !isempty(witnesses[(u,p)])
   end
   return Q
 end
 
-Q       = build_query_profunctor(db)
-# ============================================================
-# 4. Етап 2: Профунктор Q : S^op × S_res → Par(Set)  (coend)
-# ============================================================
-Q = build_query_profunctor(db)
-coend_Q = vec(any(Q, dims=2))    # ∫^p Q(u,p)
+Q = build_query_profunctor(db; resource_filter="FINANCE_DATA", action_filter="DELETE")
 
 # ============================================================
-# 5. Attr-проекція — будується НЕЗАЛЕЖНО від Q,
-#    прямо зі схеми через морфізми (Attr_input^op ⊗ Attr_res)
-#    η_(u,p) існує ⟺ ∃ ur,rp : user_of_ur(ur)=u ∧
+# 5. Атрибутивна проекція Attr_input^op ⊗ Attr_res (Лема 3.1)
+#    Будується незалежно від Q, виключно зі структури морфізмів схеми.
+#    A[u,p] = true ⟺ ∃ ur,rp : user_of_ur(ur)=u ∧
 #                               role_of_ur(ur)=role_of_rp(rp) ∧
 #                               perm_of_rp(rp)=p
 # ============================================================
 function build_attr_projection(db)
-    nU = nparts(db, :User);  nP = nparts(db, :Permission)
-    A  = falses(nU, nP)              # Attr_input^op ⊗ Attr_res
-    for ur in parts(db, :UserRole)
-        u = db[ur, :user_of_ur]
-        r = db[ur, :role_of_ur]
-        for rp in incident(db, r, :role_of_rp)
-            p = db[rp, :perm_of_rp]
-            A[u, p] = true           # морфізми схеми визначають A
-        end
+  nU = nparts(db, :User)
+  nP = nparts(db, :Permission)
+  A  = falses(nU, nP)
+  for ur in parts(db, :UserRole)
+    u = db[ur, :user_of_ur]
+    r = db[ur, :role_of_ur]
+    for rp in incident(db, r, :role_of_rp)
+      p = db[rp, :perm_of_rp]
+      A[u,p] = true
     end
-    return A
+  end
+  return A
 end
 
-A = build_attr_projection(db)        # незалежно від Q
+A = build_attr_projection(db)
 
 # ============================================================
-# 6. Перевірка soundness: η існує ⟺ Q ⊆ A  
-#    Якщо Q[u,p]=true, але A[u,p]=false — η_(u,p) не існує,
-#    натуральний квадрат не комутує → запит not sound.
+# 6. Перевірка soundness: η існує ⟺ Q ⊆ A  (Теорема 4.1)
+#    Для кожної пари (u,p) перевіряється комутативність квадрата
+#    натуральності: якщо Q[u,p]=true, але A[u,p]=false,
+#    то η_(u,p) не існує і запит не є sound.
 # ============================================================
 function check_soundness(db, Q, A)
-    violations = Tuple{Int,Int}[]
-    nU, nP = size(Q)
-    for u in 1:nU, p in 1:nP
-        if Q[u, p] && !A[u, p]       # η_(u,p) не існує
-            push!(violations, (u, p))
-        end
+  violations = Tuple{Int,Int}[]
+  nU, nP = size(Q)
+  for u in 1:nU, p in 1:nP
+    if Q[u,p] && !A[u,p]
+      push!(violations, (u,p))
     end
-    if isempty(violations)
-        println("  ✓ η існує: Q ⊆ A — запит sound")
-        return true
-    else
-        for (u, p) in violations
-            println("  ✗ η не існує: Q[$(db[u,:username]),",
-                    "$(db[p,:permission_name])] = true, A = false")
-        end
-        return false
+  end
+  if isempty(violations)
+    println("  ✓ η існує для всіх (u,p): Q ⊆ A, запит є sound")
+    return true
+  else
+    for (u,p) in violations
+      println("  ✗ η_($(db[u,:username]), $(db[p,:permission_name])) не існує: ",
+              "квадрат натуральності не комутує")
     end
+    return false
+  end
 end
 
-println("--- Sound запит (RBAC) ---")
+println("\n=== Sound запит (FINANCE_DATA, DELETE) ===")
 η_ok = check_soundness(db, Q, A)
 
 # ============================================================
-# 7. Контрприклад: некоректний запит 
+# 7. Контрприклад: некоректний запит (Приклад 4.2)
 #    Q_bad = декартовий добуток User × Permission,
-#    оминає JOIN через UserRole/RolePermission.
-#    Для пари (charlie, full_access): Q_bad=true, A=false  → η не існує → запит not sound.
+#    оминає морфізми схеми через UserRole/RolePermission.
+#    Для пар де A[u,p]=false: η не існує → запит не є sound.
 # ============================================================
 function build_unsound_query(db)
-    nU = nparts(db, :User);  nP = nparts(db, :Permission)
-    return trues(nU, nP)     # ∀u,p : Q_bad(u,p) = true
+  nU = nparts(db, :User)
+  nP = nparts(db, :Permission)
+  return trues(nU, nP)
 end
 
 Q_bad = build_unsound_query(db)
-println("--- Некоректний запит (контрприклад) ---")
+println("\n=== Некоректний запит (контрприклад) ===")
 η_bad = check_soundness(db, Q_bad, A)
-# Очікуваний вивід:
-#  ✗ η не існує: Q[charlie, full_access] = true, A = false
-#  ✗ η не існує: Q[charlie, delete_finance] = true, A = false
-#  ✗ η не існує: Q[alice, delete_finance] = true, A = false
-#  ... → η_bad = false
 
 # ============================================================
-# 6. Негативний приклад: FK-порушення → AssertionError
+# 8. Демонстрація порушення цілісності через pullback (Розділ 3.2)
+#    Додається запис з неіснуючим user_id=999.
+#    I(A) \ Im(p_A) явно вказує на запис-порушник.
 # ============================================================
-try
-  add_part!(db, :UserRole; user_of_ur=999, role_of_ur=1)
-catch e
-  println("Par(Set) захист: ", typeof(e))
-end
+println("\n=== Порушення цілісності: додавання запису з user_id=999 ===")
+add_part!(db, :UserRole; user_of_ur=999, role_of_ur=1)
+check_fk_integrity(db)
 
 # ============================================================
-# 8. Вивід матриць Q та A (таблиці soundness)
+# 9. Вивід матриць Q та A
 # ============================================================
 function print_matrix(name, M, row_labels, col_labels)
-    hdr = lpad(name, 12) * "  " * join(lpad.(col_labels, 14), " ")
-    println(hdr)
-    println(repeat("-", length(hdr)))
-    for (i, rl) in enumerate(row_labels)
-        row = lpad(rl, 12) * "  "
-        for j in 1:length(col_labels)
-            cell = M[i,j] ? "  true" : " false"
-            mark = (name != "A" && M[i,j] && !false) ? "" : ""
-            row *= lpad(cell, 14)
-        end
-        println(row)
+  hdr = lpad(name, 14) * "  " * join(lpad.(col_labels, 16), " ")
+  println(hdr)
+  println(repeat("-", length(hdr)))
+  for (i, rl) in enumerate(row_labels)
+    row = lpad(rl, 14) * "  "
+    for j in 1:length(col_labels)
+      row *= lpad(M[i,j] ? "true" : "false", 16)
     end
-    println()
+    println(row)
+  end
+  println()
 end
 
-users = db[:, :username]
+users = db[1:nparts(db,:User), :username]
 perms = db[:, :permission_name]
 
-println("=== Матриця A  (Attr_input^op ⊗ Attr_res) ===")
+println("\n=== Матриця A  (Attr_input^op ⊗ Attr_res) ===")
 print_matrix("A", A, users, perms)
 
 println("=== Матриця Q  (sound запит) ===")
-print_matrix("Q_sound", Q, users, perms)
+print_matrix("Q", Q, users, perms)
 
 println("=== Матриця Q_bad  (некоректний запит) ===")
 print_matrix("Q_bad", Q_bad, users, perms)
 
-# Показуємо де Q_bad ⊄ A  →  η не існує
-println("=== Порушення η (Q_bad[u,p]=true, A[u,p]=false) ===")
+println("=== Порушення η: пари де Q_bad ⊄ A ===")
 for (i,u) in enumerate(users), (j,p) in enumerate(perms)
-    if Q_bad[i,j] && !A[i,j]
-        println("  η_($(u),$(p)) не існує — квадрат природності не комутує")
-    end
+  if Q_bad[i,j] && !A[i,j]
+    println("  η_($(u), $(p)) не існує — квадрат натуральності не комутує")
+  end
 end
